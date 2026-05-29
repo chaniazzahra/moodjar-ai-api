@@ -19,20 +19,31 @@ app = FastAPI(
     version="1.0.0"
 )
 
-INDOBERT_PATH = "saved_indobert"
-T5_PATH = "saved_t5_model"
+MODEL_REPO = "chaniaa09/moodjar-ai-model"
 ID2LABEL_PATH = "id2label.json"
 
 with open(ID2LABEL_PATH, "r") as f:
     id2label = json.load(f)
 
-indobert_tokenizer = AutoTokenizer.from_pretrained(INDOBERT_PATH)
-indobert_model = TFAutoModelForSequenceClassification.from_pretrained(
-    INDOBERT_PATH
+indobert_tokenizer = AutoTokenizer.from_pretrained(
+    MODEL_REPO,
+    subfolder="saved_indobert"
 )
 
-t5_tokenizer = AutoTokenizer.from_pretrained(T5_PATH)
-t5_model = TFAutoModelForSeq2SeqLM.from_pretrained(T5_PATH)
+indobert_model = TFAutoModelForSequenceClassification.from_pretrained(
+    MODEL_REPO,
+    subfolder="saved_indobert"
+)
+
+t5_tokenizer = AutoTokenizer.from_pretrained(
+    MODEL_REPO,
+    subfolder="saved_t5_model"
+)
+
+t5_model = TFAutoModelForSeq2SeqLM.from_pretrained(
+    MODEL_REPO,
+    subfolder="saved_t5_model"
+)
 
 
 class MoodRequest(BaseModel):
@@ -93,7 +104,8 @@ def generate_support_message(text: str, predicted_label: str):
 def root():
     return {
         "message": "MoodJar AI API is running",
-        "model": "Local IndoBERT + Local T5",
+        "model": "IndoBERT + T5 from Hugging Face model repository",
+        "model_repo": MODEL_REPO,
         "external_ai_api": False
     }
 
