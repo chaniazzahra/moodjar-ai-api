@@ -123,5 +123,9 @@ def predict(request: MoodRequest):
         "text": request.text,
         "predictedLabel": predicted_label,
         "confidenceScore": confidence_score,
-        "supportMessage": support_message
+        "supportMessage": support_message,
+        "modelName": {
+            "classification": "Fine-tuned IndoBERT",
+            "generation": "Fine-tuned T5"
+        }
     }
