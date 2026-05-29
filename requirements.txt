@@ -1,7 +1,8 @@
 fastapi
-uvicorn[standard]
-torch
-transformers
-pydantic
+uvicorn
+tensorflow==2.16.1
+tf-keras==2.16.0
+transformers==4.41.2
 sentencepiece
-protobuf
+numpy
+pydantic

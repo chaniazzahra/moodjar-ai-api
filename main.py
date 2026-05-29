@@ -1,181 +1,115 @@
-from fastapi import FastAPI, HTTPException
+import os
+os.environ["TF_USE_LEGACY_KERAS"] = "1"
+
+import json
+import numpy as np
+import tensorflow as tf
+
+from fastapi import FastAPI
 from pydantic import BaseModel
 from transformers import (
     AutoTokenizer,
-    AutoModelForSequenceClassification,
-    AutoModelForSeq2SeqLM
+    TFAutoModelForSequenceClassification,
+    TFAutoModelForSeq2SeqLM
 )
-import torch
-import os
 
+app = FastAPI(
+    title="MoodJar AI API",
+    description="API prediksi mood dan generate support message tanpa ChatGPT/Gemini API",
+    version="1.0.0"
+)
 
-app = FastAPI(title="MoodJar AI API")
+INDOBERT_PATH = "saved_indobert"
+T5_PATH = "saved_t5_model"
+ID2LABEL_PATH = "id2label.json"
 
+with open(ID2LABEL_PATH, "r") as f:
+    id2label = json.load(f)
 
-MOOD_MODEL_PATH = "mood_model"
-SUPPORT_MODEL_PATH = "support_model"
+indobert_tokenizer = AutoTokenizer.from_pretrained(INDOBERT_PATH)
+indobert_model = TFAutoModelForSequenceClassification.from_pretrained(
+    INDOBERT_PATH
+)
 
-# Label sesuai dataset MoodJar kamu
-ID2LABEL = {
-    0: "bahagia",
-    1: "cemas",
-    2: "marah",
-    3: "sedih"
-}
+t5_tokenizer = AutoTokenizer.from_pretrained(T5_PATH)
+t5_model = TFAutoModelForSeq2SeqLM.from_pretrained(T5_PATH)
 
 
 class MoodRequest(BaseModel):
     text: str
 
 
-class MoodResponse(BaseModel):
-    modelName: dict
-    text: str
-    predictedLabel: str
-    confidenceScore: float
-    supportMessage: str
-
-
-mood_tokenizer = None
-mood_model = None
-support_tokenizer = None
-support_model = None
-
-
-def load_models():
-    global mood_tokenizer, mood_model, support_tokenizer, support_model
-
-    if os.path.exists(MOOD_MODEL_PATH) and os.path.exists(os.path.join(MOOD_MODEL_PATH, "config.json")):
-        mood_tokenizer = AutoTokenizer.from_pretrained(MOOD_MODEL_PATH)
-        mood_model = AutoModelForSequenceClassification.from_pretrained(MOOD_MODEL_PATH)
-        mood_model.eval()
-        print("Mood classification model loaded.")
-    else:
-        print("Mood model belum ditemukan di folder mood_model.")
-
-    if os.path.exists(SUPPORT_MODEL_PATH) and os.path.exists(os.path.join(SUPPORT_MODEL_PATH, "config.json")):
-        support_tokenizer = AutoTokenizer.from_pretrained(SUPPORT_MODEL_PATH)
-        support_model = AutoModelForSeq2SeqLM.from_pretrained(SUPPORT_MODEL_PATH)
-        support_model.eval()
-        print("Support message model loaded.")
-    else:
-        print("Support model belum ditemukan di folder support_model.")
-
-
-@app.on_event("startup")
-def startup_event():
-    load_models()
-
-
-@app.get("/")
-def home():
-    return {
-        "message": "MoodJar AI API is running",
-        "endpoints": {
-            "health": "/health",
-            "predict": "/predict",
-            "docs": "/docs"
-        }
-    }
-
-
-@app.get("/health")
-def health():
-    return {
-        "status": "running",
-        "moodModelLoaded": mood_model is not None,
-        "supportModelLoaded": support_model is not None
-    }
-
-
-def fallback_support_message(label: str) -> str:
-    messages = {
-        "bahagia": "Senang mendengar kamu sedang merasa bahagia. Nikmati momen baik ini dan tetap jaga energi positifmu ya.",
-        "cemas": "Aku tahu rasa cemas bisa terasa berat. Coba tarik napas pelan-pelan, beri jeda sebentar, dan hadapi semuanya satu langkah dulu.",
-        "marah": "Rasa marah itu wajar, tapi kamu tetap bisa mengendalikannya. Coba beri ruang untuk tenang sebelum merespons sesuatu.",
-        "sedih": "Tidak apa-apa merasa sedih. Kamu tidak harus kuat setiap saat. Beri dirimu waktu untuk istirahat dan pulih perlahan."
-    }
-    return messages.get(label, "Terima kasih sudah berbagi perasaanmu. Semoga kamu bisa merasa lebih baik setelah ini.")
-
-
 def predict_mood(text: str):
-    if mood_model is None or mood_tokenizer is None:
-        raise HTTPException(
-            status_code=500,
-            detail="Mood model belum dimasukkan. Isi folder mood_model terlebih dahulu."
-        )
-
-    inputs = mood_tokenizer(
+    inputs = indobert_tokenizer(
         text,
-        return_tensors="pt",
         truncation=True,
         padding=True,
-        max_length=128
+        max_length=128,
+        return_tensors="tf"
     )
 
-    with torch.no_grad():
-        outputs = mood_model(**inputs)
-        logits = outputs.logits
-        probabilities = torch.softmax(logits, dim=1)
-        confidence, predicted_id = torch.max(probabilities, dim=1)
+    outputs = indobert_model(**inputs)
+    logits = outputs.logits
 
-    label = ID2LABEL.get(predicted_id.item(), str(predicted_id.item()))
-    confidence_score = round(confidence.item(), 4)
+    probs = tf.nn.softmax(logits, axis=-1).numpy()[0]
 
-    return label, confidence_score
+    pred_id = int(np.argmax(probs))
+    confidence = float(np.max(probs))
+
+    predicted_label = id2label[str(pred_id)]
+
+    return predicted_label, confidence
 
 
-def generate_support_message(text: str, label: str):
-    if support_model is None or support_tokenizer is None:
-        return fallback_support_message(label)
+def generate_support_message(text: str, predicted_label: str):
+    input_text = f"mood: {predicted_label} | text: {text}"
 
-    input_text = f"mood: {label} text: {text}"
-
-    inputs = support_tokenizer(
+    inputs = t5_tokenizer(
         input_text,
-        return_tensors="pt",
+        return_tensors="tf",
         truncation=True,
         padding=True,
-        max_length=128
+        max_length=256
     )
 
-    with torch.no_grad():
-        output_ids = support_model.generate(
-            **inputs,
-            max_length=80,
-            num_beams=4,
-            early_stopping=True
-        )
+    output = t5_model.generate(
+        **inputs,
+        max_new_tokens=300,
+        min_new_tokens=25,
+        num_beams=4,
+        repetition_penalty=2.0,
+        early_stopping=True
+    )
 
-    support_message = support_tokenizer.decode(
-        output_ids[0],
+    support_message = t5_tokenizer.decode(
+        output[0],
         skip_special_tokens=True
     )
-
-    if not support_message.strip():
-        return fallback_support_message(label)
 
     return support_message
 
 
-@app.post("/predict", response_model=MoodResponse)
-def predict(data: MoodRequest):
-    if not data.text or not data.text.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="Text tidak boleh kosong."
-        )
+@app.get("/")
+def root():
+    return {
+        "message": "MoodJar AI API is running",
+        "model": "Local IndoBERT + Local T5",
+        "external_ai_api": False
+    }
 
-    label, confidence_score = predict_mood(data.text)
-    support_message = generate_support_message(data.text, label)
+
+@app.post("/predict")
+def predict(request: MoodRequest):
+    predicted_label, confidence_score = predict_mood(request.text)
+
+    support_message = generate_support_message(
+        request.text,
+        predicted_label
+    )
 
     return {
-        "modelName": {
-            "classification": "indobenchmark/indobert-base-p1 fine-tuned MoodJar",
-            "generation": "t5-small fine-tuned MoodJar"
-        },
-        "text": data.text,
-        "predictedLabel": label,
+        "text": request.text,
+        "predictedLabel": predicted_label,
         "confidenceScore": confidence_score,
         "supportMessage": support_message
     }
