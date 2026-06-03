@@ -1,17 +1,15 @@
-import os
-os.environ["TF_USE_LEGACY_KERAS"] = "1"
-
 import json
+import pickle
+import re
 import numpy as np
 import tensorflow as tf
+import tf_keras as keras
 
 from fastapi import FastAPI
 from pydantic import BaseModel
-from transformers import (
-    AutoTokenizer,
-    TFAutoModelForSequenceClassification,
-    TFAutoModelForSeq2SeqLM
-)
+from transformers import AutoTokenizer, TFAutoModelForSeq2SeqLM
+from huggingface_hub import hf_hub_download
+from tf_keras.models import load_model
 
 app = FastAPI(
     title="MoodJar AI API",
@@ -20,20 +18,22 @@ app = FastAPI(
 )
 
 MODEL_REPO = "chaniaa09/moodjar-ai-model"
-ID2LABEL_PATH = "id2label.json"
 
-with open(ID2LABEL_PATH, "r") as f:
-    id2label = json.load(f)
+model_path = hf_hub_download(repo_id=MODEL_REPO, filename="saved_cnn/model.keras")
+tok_path = hf_hub_download(repo_id=MODEL_REPO, filename="saved_cnn/tok.pkl")
+le_path = hf_hub_download(repo_id=MODEL_REPO, filename="saved_cnn/le.pkl")
+cfg_path = hf_hub_download(repo_id=MODEL_REPO, filename="saved_cnn/cfg.pkl")
 
-indobert_tokenizer = AutoTokenizer.from_pretrained(
-    MODEL_REPO,
-    subfolder="saved_indobert"
-)
+model = load_model(model_path)
 
-indobert_model = TFAutoModelForSequenceClassification.from_pretrained(
-    MODEL_REPO,
-    subfolder="saved_indobert"
-)
+with open(tok_path, "rb") as f:
+    tokenizer = pickle.load(f)
+
+with open(le_path, "rb") as f:
+    le = pickle.load(f)
+
+with open(cfg_path, "rb") as f:
+    config = pickle.load(f)
 
 t5_tokenizer = AutoTokenizer.from_pretrained(
     MODEL_REPO,
@@ -50,37 +50,71 @@ class MoodRequest(BaseModel):
     text: str
 
 
-def predict_mood(text: str):
-    inputs = indobert_tokenizer(
-        text,
-        truncation=True,
-        padding=True,
-        max_length=128,
-        return_tensors="tf"
+def predict_mood(text):
+    seq = tokenizer.texts_to_sequences([text.lower()])
+
+    pad = keras.preprocessing.sequence.pad_sequences(
+        seq,
+        maxlen=config["maxlen"],
+        padding="post",
+        truncating="post"
     )
 
-    outputs = indobert_model(**inputs)
-    logits = outputs.logits
+    probs = model.predict(pad, verbose=0)[0]
 
-    probs = tf.nn.softmax(logits, axis=-1).numpy()[0]
+    pred_class = int(np.argmax(probs))
+    confidence = float(probs[pred_class])
+    cnn_label = le.inverse_transform([pred_class])[0]
 
-    pred_id = int(np.argmax(probs))
-    confidence = float(np.max(probs))
+    daily_activity_words = [
+        "menunggu bus", "menunggu kereta", "menunggu angkot",
+        "makan", "minum", "tidur", "mandi", "belajar",
+        "kuliah", "rapat", "bekerja", "berangkat kerja", "pulang kerja"
+    ]
 
-    predicted_label = id2label[str(pred_id)]
+    emotional_words = [
+        "senang", "bahagia", "gembira",
+        "sedih", "kecewa", "menangis",
+        "marah", "kesal", "jengkel",
+        "cemas", "khawatir", "takut",
+        "panik", "gelisah",
+        "stres", "stress", "capek"
+    ]
 
-    return predicted_label, confidence
+    text_lower = text.lower()
+
+    contains_daily_activity = any(w in text_lower for w in daily_activity_words)
+
+    contains_emotional_word = any(
+        re.search(rf"\b{re.escape(w)}\b", text_lower)
+        for w in emotional_words
+    )
+
+    if confidence < 0.45 and not contains_emotional_word:
+        final_label = "biasa saja"
+    elif contains_daily_activity and not contains_emotional_word:
+        final_label = "biasa saja"
+    else:
+        final_label = cnn_label
+
+    all_confidences = {
+        le.inverse_transform([i])[0]: float(probs[i])
+        for i in range(len(probs))
+    }
+
+    return {
+        "predictedLabel": final_label,
+        "confidenceScore": confidence
+    }
 
 
-def generate_support_message(text: str, predicted_label: str):
+def generate_support(text, predicted_label):
     input_text = f"mood: {predicted_label} | text: {text}"
 
     inputs = t5_tokenizer(
         input_text,
         return_tensors="tf",
-        truncation=True,
-        padding=True,
-        max_length=256
+        truncation=True
     )
 
     output = t5_model.generate(
@@ -104,28 +138,29 @@ def generate_support_message(text: str, predicted_label: str):
 def root():
     return {
         "message": "MoodJar AI API is running",
-        "model": "IndoBERT + T5 from Hugging Face model repository",
         "model_repo": MODEL_REPO,
+        "classification": "CNN",
+        "generation": "Fine-tuned T5",
         "external_ai_api": False
     }
 
 
 @app.post("/predict")
 def predict(request: MoodRequest):
-    predicted_label, confidence_score = predict_mood(request.text)
+    mood_result = predict_mood(request.text)
 
-    support_message = generate_support_message(
+    support_message = generate_support(
         request.text,
-        predicted_label
+        mood_result["predictedLabel"]
     )
 
     return {
         "text": request.text,
-        "predictedLabel": predicted_label,
-        "confidenceScore": confidence_score,
+        "predictedLabel": mood_result["predictedLabel"],
+        "confidenceScore": mood_result["confidenceScore"],
         "supportMessage": support_message,
-  "modelName": {
-    "classification": "Fine-tuned IndoBERT",
-    "generation": "Fine-tuned T5"
-}
+        "modelName": {
+            "classification": "CNN",
+            "generation": "Fine-tuned T5"
+        }
     }
